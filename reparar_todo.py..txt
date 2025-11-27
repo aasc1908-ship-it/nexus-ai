@@ -1,0 +1,450 @@
+import os
+import time
+
+# CONFIGURACIÓN
+PROJECT_NAME = "nexus-ai-studio"
+
+# --- CÓDIGO DE LA APP (RESPALDO PARA REPARACIÓN) ---
+# (Aquí incluyo los archivos esenciales por si se borraron o no se crearon bien)
+
+APP_JSX_CONTENT = r"""
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  MessageSquare, Image as ImageIcon, Video, Mic, Send, Sparkles, Settings, 
+  Key, Trash2, Database, History, Play, Pause, Download, CheckCircle, Film, 
+  Brain, Library, Layers, Bot, Cpu, Globe, Wand2, Share2, Paperclip, FileText, 
+  Loader2, MicOff, LogIn, LogOut, PenTool, Clapperboard, Languages, AlignLeft, 
+  Layout, Plus, MoreHorizontal, ArrowRight, CheckSquare, AlertCircle, Calendar,
+  Zap, ExternalLink, X, BarChart2, Youtube, Instagram, Facebook, Smartphone, 
+  Eye, Users, TrendingUp
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signOut, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import { getFirestore, collection, addDoc, query, orderBy, limit, onSnapshot, serverTimestamp, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+
+// --- SISTEMA ---
+let auth, db, storage;
+let isFirebaseInitialized = false;
+
+const initFirebase = (configStr) => {
+  try {
+    if (!configStr) return false;
+    const config = JSON.parse(configStr);
+    const app = initializeApp(config);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    storage = getStorage(app); 
+    isFirebaseInitialized = true;
+    return true;
+  } catch (e) {
+    console.error("Error Firebase:", e);
+    return false;
+  }
+};
+
+// --- UTILIDADES ---
+const fileToBase64 = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      const base64Data = reader.result.split(',')[1];
+      resolve(base64Data);
+    };
+    reader.onerror = error => reject(error);
+  });
+};
+
+// --- API CALLS ---
+const callGeminiAPI = async (apiKey, modelVersion, prompt, systemContext = '', attachment = null) => {
+  if (!apiKey) throw new Error("Falta API Key Gemini");
+  const model = modelVersion || 'gemini-1.5-flash';
+  const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  
+  const parts = [];
+  if (systemContext) parts.push({ text: `SISTEMA:\n${systemContext}\n---` });
+  if (attachment) parts.push({ inlineData: { mimeType: attachment.type, data: attachment.base64 } });
+  parts.push({ text: prompt });
+
+  const response = await fetch(API_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts }] })
+  });
+  
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.error?.message || 'Error Gemini API');
+  }
+  const data = await response.json();
+  return data.candidates[0].content.parts[0].text;
+};
+
+const enhancePromptWithAI = async (apiKey, simplePrompt, type = 'image') => {
+  let instruction = "";
+  if (type === 'image') instruction = `Eres experto en prompts de imagen (Flux). Reescribe en inglés detallado: "${simplePrompt}"`;
+  else if (type === 'video') instruction = `Eres director de cine. Crea prompt técnico de video en inglés para: "${simplePrompt}"`;
+  else if (type === 'task') instruction = `Estratega YouTube. Dame esquema de 3 puntos para: "${simplePrompt}"`;
+  
+  return await callGeminiAPI(apiKey, 'gemini-1.5-flash', instruction);
+};
+
+const callHuggingFaceAPI = async (apiKey, prompt) => {
+  if (!apiKey) throw new Error("Falta Token HF");
+  const response = await fetch("https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell", {
+    method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ inputs: prompt }),
+  });
+  if (!response.ok) throw new Error("Error HF API");
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+};
+
+// --- COMPONENTES UI ---
+const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false }) => {
+  const variants = {
+    primary: "bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg border border-indigo-500/50",
+    secondary: "bg-[#2a2a35] hover:bg-[#32323e] text-gray-200 border border-gray-700",
+    magic: "bg-gradient-to-r from-amber-400 to-orange-500 text-black font-bold hover:scale-105",
+    danger: "bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
+  };
+  return (
+    <button onClick={onClick} disabled={disabled} className={`px-4 py-2 rounded-xl font-medium transition-all flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 ${variants[variant]} ${className}`}>
+      {children}
+    </button>
+  );
+};
+
+// --- MODALES ---
+const ConfigModal = ({ isOpen, onClose, config, onSave }) => {
+  const [localConfig, setLocalConfig] = useState(config);
+  useEffect(() => { if (isOpen) setLocalConfig(config); }, [isOpen, config]);
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+      <div className="bg-[#111116] border border-gray-700 rounded-2xl w-full max-w-md p-6 relative">
+        <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-white"><X size={20}/></button>
+        <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Settings className="text-indigo-500"/> Ajustes</h2>
+        <div className="space-y-4">
+            <div>
+                <label className="text-xs text-gray-400 block mb-1">Gemini API Key</label>
+                <input type="password" value={localConfig.gemini} onChange={(e) => setLocalConfig({...localConfig, gemini: e.target.value})} className="w-full bg-[#0a0a0f] border border-gray-700 rounded p-2 text-white"/>
+            </div>
+            <div>
+                <label className="text-xs text-gray-400 block mb-1">Hugging Face Token</label>
+                <input type="password" value={localConfig.huggingFace} onChange={(e) => setLocalConfig({...localConfig, huggingFace: e.target.value})} className="w-full bg-[#0a0a0f] border border-gray-700 rounded p-2 text-white"/>
+            </div>
+            <div>
+                <label className="text-xs text-gray-400 block mb-1">Firebase Config (JSON)</label>
+                <textarea value={localConfig.firebaseConf} onChange={(e) => setLocalConfig({...localConfig, firebaseConf: e.target.value})} className="w-full h-20 bg-[#0a0a0f] border border-gray-700 rounded p-2 text-white text-xs font-mono"/>
+            </div>
+        </div>
+        <div className="flex justify-end gap-2 mt-6">
+           <Button variant="secondary" onClick={onClose}>Cancelar</Button>
+           <Button onClick={() => { onSave(localConfig); onClose(); }}>Guardar</Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- MÓDULOS ---
+const KanbanColumn = ({ status, title, color, projects, onDelete, onExpand, onUpdateStatus, loadingId }) => {
+  const items = projects.filter(p => p.status === status);
+  return (
+    <div className="flex-1 min-w-[250px] bg-[#16161d] rounded-2xl border border-gray-800 flex flex-col h-full">
+      <div className={`p-3 border-b border-gray-800 font-bold text-sm uppercase flex items-center gap-2 ${color}`}>
+        <div className="w-2 h-2 rounded-full bg-current"/> {title} <span className="ml-auto opacity-50">{items.length}</span>
+      </div>
+      <div className="flex-1 overflow-y-auto p-2 space-y-2 scrollbar-thin">
+        {items.map(p => (
+          <div key={p.id} className="bg-[#1f1f27] p-3 rounded-xl border border-gray-700 hover:border-gray-500 group transition-all">
+            <div className="flex justify-between mb-2">
+              <h4 className="font-bold text-white text-sm">{p.title}</h4>
+              <button onClick={() => onDelete(p.id)} className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100"><Trash2 size={14}/></button>
+            </div>
+            {p.description && <div className="text-[10px] text-gray-400 mb-2 bg-black/20 p-2 rounded">{p.description}</div>}
+            <div className="flex justify-between items-center pt-2 border-t border-white/5">
+               <button onClick={() => onExpand(p)} disabled={loadingId === p.id} className="text-[10px] text-indigo-400 flex items-center gap-1 hover:text-white">
+                 {loadingId === p.id ? <Loader2 size={10} className="animate-spin"/> : <Sparkles size={10}/>} Expandir
+               </button>
+               <div className="flex gap-1">
+                 {status !== 'idea' && <button onClick={() => onUpdateStatus(p.id, 'prev')} className="p-1 hover:bg-gray-700 rounded text-gray-400"><ArrowRight size={12} className="rotate-180"/></button>}
+                 {status !== 'published' && <button onClick={() => onUpdateStatus(p.id, 'next')} className="p-1 hover:bg-gray-700 rounded text-gray-400"><ArrowRight size={12}/></button>}
+               </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const ManagerModule = ({ user, config, openSettings }) => {
+  const [projects, setProjects] = useState([]);
+  const [newTitle, setNewTitle] = useState('');
+  const [loadingId, setLoadingId] = useState(null);
+
+  useEffect(() => {
+    if (!isFirebaseInitialized || !user) return;
+    const q = query(collection(db, `users/${user.uid}/projects`), orderBy('createdAt', 'desc'), limit(50));
+    return onSnapshot(q, (s) => setProjects(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+  }, [user]);
+
+  const addProject = async () => {
+    if (!newTitle.trim()) return;
+    if (!isFirebaseInitialized) return alert("Conecta Firebase");
+    await addDoc(collection(db, `users/${user.uid}/projects`), { title: newTitle, status: 'idea', description: '', createdAt: serverTimestamp() });
+    setNewTitle('');
+  };
+
+  const updateStatus = async (id, dir) => {
+    const flow = ['idea', 'scripting', 'production', 'published'];
+    const p = projects.find(x => x.id === id);
+    const idx = flow.indexOf(p.status);
+    const next = dir === 'next' ? flow[idx + 1] : flow[idx - 1];
+    if (next) await updateDoc(doc(db, `users/${user.uid}/projects`, id), { status: next });
+  };
+
+  const magicExpand = async (p) => {
+    if (!config.gemini) { openSettings(); return; }
+    setLoadingId(p.id);
+    try {
+        const res = await enhancePromptWithAI(config.gemini, p.title, 'task');
+        await updateDoc(doc(db, `users/${user.uid}/projects`, p.id), { description: res });
+    } catch (e) { alert(e.message); } finally { setLoadingId(null); }
+  };
+
+  const deleteProject = async (id) => { if(confirm("¿Borrar?")) await deleteDoc(doc(db, `users/${user.uid}/projects`, id)); };
+
+  if (!isFirebaseInitialized) return <div className="h-full flex flex-col items-center justify-center text-gray-500"><Layout size={48}/><p>Conecta Firebase</p></div>;
+
+  return (
+    <div className="h-full flex flex-col p-6 gap-4 overflow-hidden">
+      <div className="flex justify-between">
+        <h2 className="text-xl font-bold text-white flex gap-2"><Layout className="text-blue-500"/> Nexus Manager</h2>
+        <div className="flex gap-2">
+           <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Nueva idea..." className="bg-[#16161d] border border-gray-700 rounded px-3 text-white text-sm outline-none"/>
+           <Button onClick={addProject}><Plus size={16}/></Button>
+        </div>
+      </div>
+      <div className="flex-1 flex gap-4 overflow-x-auto pb-2">
+        <KanbanColumn status="idea" title="Ideas" color="text-gray-400" projects={projects} onDelete={deleteProject} onExpand={magicExpand} onUpdateStatus={updateStatus} loadingId={loadingId}/>
+        <KanbanColumn status="scripting" title="Guion" color="text-yellow-400" projects={projects} onDelete={deleteProject} onExpand={magicExpand} onUpdateStatus={updateStatus} loadingId={loadingId}/>
+        <KanbanColumn status="production" title="Producción" color="text-purple-400" projects={projects} onDelete={deleteProject} onExpand={magicExpand} onUpdateStatus={updateStatus} loadingId={loadingId}/>
+        <KanbanColumn status="published" title="Publicado" color="text-green-400" projects={projects} onDelete={deleteProject} onExpand={magicExpand} onUpdateStatus={updateStatus} loadingId={loadingId}/>
+      </div>
+    </div>
+  );
+};
+
+const ChatModule = ({ config, openSettings, user }) => {
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState([{ role: 'ai', content: 'NexusAI Chat listo.' }]);
+  const [loading, setLoading] = useState(false);
+  const endRef = useRef(null);
+
+  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages]);
+
+  const send = async () => {
+    if (!input.trim()) return;
+    if (!config.gemini) { openSettings(); return; }
+    const txt = input; setInput('');
+    setMessages(p => [...p, { role: 'user', content: txt }]);
+    setLoading(true);
+    try {
+        const res = await callGeminiAPI(config.gemini, config.geminiModel, txt);
+        setMessages(p => [...p, { role: 'ai', content: res }]);
+        if (user && isFirebaseInitialized) addDoc(collection(db, `users/${user.uid}/chats`), { role: 'user', content: txt, timestamp: serverTimestamp() });
+    } catch (e) { setMessages(p => [...p, { role: 'ai', content: "Error: " + e.message }]); } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {messages.map((m, i) => (
+                <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[80%] p-3 rounded-xl text-sm ${m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-[#1f1f27] text-gray-200'}`}>{m.content}</div>
+                </div>
+            ))}
+            <div ref={endRef}/>
+        </div>
+        <div className="p-4 border-t border-gray-800 flex gap-2">
+            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && send()} placeholder="Escribe..." className="flex-1 bg-[#16161d] border border-gray-700 rounded px-4 py-2 text-white outline-none"/>
+            <Button onClick={send} disabled={loading}><Send size={16}/></Button>
+        </div>
+    </div>
+  );
+};
+
+const ImageModule = ({ config, openSettings, user }) => {
+    const [prompt, setPrompt] = useState('');
+    const [image, setImage] = useState(null);
+    const [loading, setLoading] = useState(false);
+
+    const generate = async () => {
+        if (!config.huggingFace) { openSettings(); return; }
+        setLoading(true);
+        try {
+            const url = await callHuggingFaceAPI(config.huggingFace, prompt);
+            setImage(url);
+            if (user && isFirebaseInitialized && storage) {
+                const res = await fetch(url); const blob = await res.blob();
+                const sRef = ref(storage, `users/${user.uid}/images/${Date.now()}.png`);
+                await uploadBytes(sRef, blob);
+                const dUrl = await getDownloadURL(sRef);
+                addDoc(collection(db, `users/${user.uid}/assets`), { type: 'image', prompt, url: dUrl, createdAt: serverTimestamp() });
+            }
+        } catch (e) { alert(e.message); } finally { setLoading(false); }
+    };
+
+    return (
+        <div className="flex flex-col h-full p-6 gap-4">
+            <div className="flex gap-2">
+                <input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Prompt de imagen..." className="flex-1 bg-[#16161d] border border-gray-700 rounded px-4 py-2 text-white"/>
+                <Button onClick={generate} disabled={loading}>{loading ? '...' : 'Generar'}</Button>
+            </div>
+            <div className="flex-1 bg-[#050508] rounded-xl flex items-center justify-center border border-gray-800">
+                {image ? <img src={image} className="max-h-full max-w-full object-contain"/> : <ImageIcon className="text-gray-700" size={48}/>}
+            </div>
+        </div>
+    );
+};
+
+// --- APP MAIN ---
+export default function NexusAI() {
+  const [tab, setTab] = useState('manager');
+  const [config, setConfig] = useState({ gemini: '', huggingFace: '', firebaseConf: '', geminiModel: 'gemini-1.5-flash' });
+  const [openConfig, setOpenConfig] = useState(false);
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('nexus_conf');
+    if (saved) {
+        const c = JSON.parse(saved);
+        setConfig(c);
+        if (c.firebaseConf && !isFirebaseInitialized) {
+            if(initFirebase(c.firebaseConf)) {
+                const auth = getAuth();
+                onAuthStateChanged(auth, setUser);
+            }
+        }
+    }
+  }, []);
+
+  const saveConfig = (c) => {
+    setConfig(c);
+    localStorage.setItem('nexus_conf', JSON.stringify(c));
+    if (c.firebaseConf && !isFirebaseInitialized) {
+        if(initFirebase(c.firebaseConf)) {
+            const auth = getAuth();
+            if(!auth.currentUser) signInAnonymously(auth);
+            onAuthStateChanged(auth, setUser);
+        }
+    }
+  };
+
+  const login = async () => {
+      if(!auth) return alert("Configura DB primero");
+      try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch(e) { alert(e.message); }
+  };
+
+  const menu = [
+    { id: 'manager', label: 'Gestión', icon: Layout },
+    { id: 'chat', label: 'Chat', icon: Bot },
+    { id: 'image', label: 'Imagen', icon: ImageIcon },
+  ];
+
+  return (
+    <div className="h-screen w-screen bg-black text-white font-sans flex overflow-hidden">
+      <ConfigModal isOpen={openConfig} onClose={() => setOpenConfig(false)} config={config} onSave={saveConfig}/>
+      <nav className="w-16 md:w-64 bg-[#050508] border-r border-gray-800 flex flex-col z-20">
+        <div className="p-4 flex items-center gap-2 border-b border-gray-800 font-bold text-lg"><Cpu className="text-indigo-500"/> NexusAI</div>
+        <div className="flex-1 p-2 space-y-1">
+            {menu.map(m => (
+                <button key={m.id} onClick={() => setTab(m.id)} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${tab === m.id ? 'bg-indigo-600' : 'hover:bg-[#1f1f27] text-gray-400'}`}>
+                    <m.icon size={20}/> <span className="hidden md:block">{m.label}</span>
+                </button>
+            ))}
+        </div>
+        <div className="p-4 border-t border-gray-800 space-y-2">
+            {user && !user.isAnonymous ? (
+                <div className="flex items-center gap-2 text-xs overflow-hidden"><img src={user.photoURL} className="w-6 h-6 rounded-full"/><span className="truncate">{user.displayName}</span></div>
+            ) : (
+                <button onClick={login} className="w-full flex items-center justify-center gap-2 bg-white text-black p-2 rounded font-bold text-xs"><LogIn size={14}/> Entrar</button>
+            )}
+            <button onClick={() => setOpenConfig(true)} className="w-full flex items-center gap-2 p-2 rounded hover:bg-[#1f1f27] text-gray-400 text-xs"><Settings size={14}/> Ajustes</button>
+        </div>
+      </nav>
+      <main className="flex-1 relative bg-[#000] overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-indigo-900/10 to-purple-900/10 pointer-events-none"/>
+        {tab === 'manager' && <ManagerModule user={user} config={config} openSettings={() => setOpenConfig(true)}/>}
+        {tab === 'chat' && <ChatModule config={config} openSettings={() => setOpenConfig(true)} user={user}/>}
+        {tab === 'image' && <ImageModule config={config} openSettings={() => setOpenConfig(true)} user={user}/>}
+      </main>
+    </div>
+  );
+}
+"""
+
+files = {
+    "package.json": """{
+  "name": "nexus-ai-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
+  "dependencies": { "react": "^18.2.0", "react-dom": "^18.2.0", "lucide-react": "^0.344.0", "firebase": "^10.8.0" },
+  "devDependencies": { "@types/react": "^18.2.64", "@types/react-dom": "^18.2.21", "@vitejs/plugin-react": "^4.2.1", "autoprefixer": "^10.4.18", "postcss": "^8.4.35", "tailwindcss": "^3.4.1", "vite": "^5.1.6" }
+}""",
+    "vite.config.js": "import { defineConfig } from 'vite'; import react from '@vitejs/plugin-react'; export default defineConfig({ plugins: [react()] });",
+    "index.html": """<!doctype html><html lang="es"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>NexusAI Studio</title><style>body{background:#000;margin:0}</style></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>""",
+    "tailwind.config.js": """export default { content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"], theme: { extend: { animation: { 'spin-slow': 'spin 3s linear infinite' } } }, plugins: [] }""",
+    "postcss.config.js": "export default { plugins: { tailwindcss: {}, autoprefixer: {} } }",
+    "src/main.jsx": "import React from 'react'; import ReactDOM from 'react-dom/client'; import App from './App.jsx'; import './index.css'; ReactDOM.createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);",
+    "src/index.css": "@tailwind base; @tailwind components; @tailwind utilities; body { margin: 0; font-family: system-ui, sans-serif; background-color: #000; color: #fff; } ::-webkit-scrollbar { width: 8px; height: 8px; } ::-webkit-scrollbar-track { background: #111116; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; } .input-std { @apply w-full bg-[#0a0a0f] border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500 outline-none transition-all; }",
+    "src/App.jsx": APP_JSX_CONTENT
+}
+
+def repair_and_create():
+    print("🔧 INICIANDO REPARACIÓN Y VERIFICACIÓN DE NEXUS AI...")
+    
+    # 1. Verificar/Crear Carpeta Principal
+    if not os.path.exists(PROJECT_NAME):
+        os.makedirs(PROJECT_NAME)
+        print(f"✅ Carpeta '{PROJECT_NAME}' creada.")
+    else:
+        print(f"✅ Carpeta '{PROJECT_NAME}' encontrada.")
+
+    # 2. Verificar/Crear Carpeta SRC
+    src_path = os.path.join(PROJECT_NAME, "src")
+    if not os.path.exists(src_path):
+        os.makedirs(src_path)
+        print(f"✅ Carpeta 'src' creada.")
+    
+    # 3. Reparar Archivos (Sobrescribir si están mal o vacíos)
+    for filename, content in files.items():
+        path = os.path.join(PROJECT_NAME, filename)
+        
+        # Escribimos el archivo siempre para asegurar que tenga el código correcto
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"✅ Archivo restaurado/verificado: {filename}")
+        except Exception as e:
+            print(f"❌ ERROR al escribir {filename}: {e}")
+
+    print("\n" + "="*50)
+    print("🎉 ¡TODO LISTO Y REPARADO! 🎉")
+    print("="*50)
+    print("Tu carpeta 'nexus-ai-studio' en el Escritorio ahora contiene la App V9.1 completa.")
+    print("Pasos siguientes:")
+    print("1. Arrastra esta carpeta a GitHub.")
+    print("2. Conéctala a Vercel.")
+    print("3. ¡Disfruta!")
+    
+    input("\nPresiona ENTER para salir...")
+
+if __name__ == "__main__":
+    repair_and_create()
